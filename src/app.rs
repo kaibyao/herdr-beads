@@ -148,8 +148,15 @@ impl App {
         v
     }
 
-    /// Visible bead ids in a status, sorted by priority then most-recent.
+    /// Visible bead ids in a status, in `tree_in` order.
     pub fn ids_in(&self, status: &str) -> Vec<String> {
+        self.tree_in(status).into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// Visible beads in a status with their nesting depth. Siblings sort by
+    /// priority then most-recent, and each bead follows its parent. A bead
+    /// whose parent is not in this group starts at depth 0.
+    pub fn tree_in(&self, status: &str) -> Vec<(String, usize)> {
         let mut v: Vec<&Bead> = self
             .beads
             .iter()
@@ -160,7 +167,38 @@ impl App {
                 .cmp(&b.priority)
                 .then_with(|| b.updated_at.cmp(&a.updated_at))
         });
-        v.into_iter().map(|b| b.id.clone()).collect()
+        let in_group: HashSet<&str> = v.iter().map(|b| b.id.as_str()).collect();
+        let mut roots: Vec<&Bead> = Vec::new();
+        let mut children: HashMap<&str, Vec<&Bead>> = HashMap::new();
+        for b in &v {
+            match b
+                .parent
+                .as_deref()
+                .filter(|p| *p != b.id && in_group.contains(p))
+            {
+                Some(p) => children.entry(p).or_default().push(b),
+                None => roots.push(b),
+            }
+        }
+
+        let mut out: Vec<(String, usize)> = Vec::with_capacity(v.len());
+        let mut seen: HashSet<&str> = HashSet::new();
+        // Beads in a parent cycle have no root, so after the roots any bead
+        // not yet listed starts its own walk at depth 0.
+        for start in roots.into_iter().chain(v.iter().copied()) {
+            let mut stack = vec![(start, 0)];
+            while let Some((b, depth)) = stack.pop() {
+                if !seen.insert(b.id.as_str()) {
+                    continue;
+                }
+                out.push((b.id.clone(), depth));
+                if let Some(kids) = children.get(b.id.as_str()) {
+                    // Reversed so the first child pops first.
+                    stack.extend(kids.iter().rev().map(|c| (*c, depth + 1)));
+                }
+            }
+        }
+        out
     }
 
     /// Kanban columns: (status, ids), empty columns included.
@@ -834,5 +872,57 @@ mod auto_dock_tests {
         assert!(app.status_msg.contains("needs herdr"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+    use crate::model::{Mode, Scope};
+
+    fn bead(id: &str, priority: u8, parent: Option<&str>) -> Bead {
+        Bead {
+            id: id.into(),
+            status: "open".into(),
+            priority,
+            parent: parent.map(Into::into),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn children_follow_their_parent_one_level_deeper() {
+        let mut app = App::new(Mode::Dock, Scope::Repo);
+        app.beads = vec![
+            bead("child-p0", 0, Some("epic")),
+            bead("epic", 2, None),
+            bead("grandchild", 1, Some("child-p0")),
+            bead("loose", 1, None),
+            bead("child-p3", 3, Some("epic")),
+            // Parent is in another group, so it starts at depth 0.
+            bead("orphan", 4, Some("elsewhere")),
+            // A parent cycle still lists both beads, and a bead that names
+            // itself as parent is a root.
+            bead("cycle-a", 4, Some("cycle-b")),
+            bead("cycle-b", 4, Some("cycle-a")),
+            bead("self-parent", 0, Some("self-parent")),
+        ];
+        let tree = app.tree_in("open");
+        let got: Vec<(&str, usize)> = tree.iter().map(|(id, d)| (id.as_str(), *d)).collect();
+        assert_eq!(
+            got,
+            [
+                ("self-parent", 0),
+                ("loose", 0),
+                ("epic", 0),
+                ("child-p0", 1),
+                ("grandchild", 2),
+                ("child-p3", 1),
+                ("orphan", 0),
+                ("cycle-a", 0),
+                ("cycle-b", 1),
+            ]
+        );
+        assert_eq!(app.ids_in("open").len(), 9);
     }
 }
