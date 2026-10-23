@@ -14,22 +14,23 @@ use ratatui::Frame;
 /// Deeper beads indent no further, so a narrow dock keeps room for the title.
 const MAX_INDENT_DEPTH: usize = 4;
 
-pub fn bead_line(b: &Bead, depth: usize, width: u16) -> Line<'static> {
-    // Fixed prefix before the title: indent (2, plus 2 per depth level up to
-    // MAX_INDENT_DEPTH) + "P0 " (3) + type+space (2) + "{id:<13} " (14)
-    // = 21 cols at depth 0. Reserve the " ⛓N" suffix only when the bead
-    // actually carries deps (chain glyph renders 2 cells).
-    let indent = 2 + 2 * depth.min(MAX_INDENT_DEPTH);
+/// `indent` is the extra columns before the row for its nesting depth.
+pub fn bead_line(b: &Bead, indent: usize, width: u16) -> Line<'static> {
+    // Fixed prefix before the title: "  " (2) + indent + "P0 " (3)
+    // + type+space (2) + "{id:<13} " (14) = 21 cols with no indent.
+    // Reserve the " ⛓N" suffix only when the bead actually carries deps
+    // (chain glyph renders 2 cells).
+    let lead = 2 + indent;
     let dep_w = if b.dependency_count > 0 {
         3 + b.dependency_count.to_string().len()
     } else {
         0
     };
     let title_w = (width as usize)
-        .saturating_sub(indent + 19 + dep_w + theme::blocked_width(b))
+        .saturating_sub(lead + 19 + dep_w + theme::blocked_width(b))
         .max(6);
     let mut spans = vec![
-        Span::raw(" ".repeat(indent)),
+        Span::raw(" ".repeat(lead)),
         Span::styled(
             format!("{} ", theme::priority_glyph(b.priority)),
             Style::default().fg(theme::priority_color(b.priority)),
@@ -84,7 +85,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
         }
         for (id, depth) in group {
             if let Some(b) = app.beads.iter().find(|x| x.id == id) {
-                lines.push(bead_line(b, depth, area.width));
+                lines.push(bead_line(
+                    b,
+                    depth.min(MAX_INDENT_DEPTH) * app.list_indent,
+                    area.width,
+                ));
                 ids.push(Some(id));
             }
         }

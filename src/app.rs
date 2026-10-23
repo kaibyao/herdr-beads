@@ -4,6 +4,7 @@
 use crate::bd;
 use crate::bd::events::Record;
 use crate::bd::types::Bead;
+use crate::config::Config;
 use crate::form::CreateForm;
 use crate::input::{Input, InputKind};
 use crate::model::{status_rank, Mode, Scope, SortKey, View, STATUS_ORDER};
@@ -66,9 +67,14 @@ pub struct App {
     pub writer: Writer,
     pub should_quit: bool,
     pub hits: Hits,
+    /// Columns per nesting level in the List view; 0 means a flat list.
+    pub list_indent: usize,
+    /// Why `config.toml` could not be used, shown in the status line.
+    pub config_error: Option<String>,
 }
 
 impl App {
+    /// A board with default settings; `main` applies `config.toml` on top.
     pub fn new(mode: Mode, scope: Scope) -> Self {
         let mut app = App {
             mode,
@@ -99,6 +105,8 @@ impl App {
             writer: Writer::start(),
             should_quit: false,
             hits: Hits::default(),
+            list_indent: 0,
+            config_error: None,
         };
         app.reload();
         app
@@ -148,14 +156,20 @@ impl App {
         v
     }
 
+    pub fn apply_config(&mut self, (config, error): (Config, Option<String>)) {
+        self.list_indent = config.list_indent;
+        self.config_error = error;
+    }
+
     /// Visible bead ids in a status, in `tree_in` order.
     pub fn ids_in(&self, status: &str) -> Vec<String> {
         self.tree_in(status).into_iter().map(|(id, _)| id).collect()
     }
 
-    /// Visible beads in a status with their nesting depth. Siblings sort by
-    /// priority then most-recent, and each bead follows its parent. A bead
-    /// whose parent is not in this group starts at depth 0.
+    /// Visible beads in a status with their nesting depth, sorted by priority
+    /// then most-recent. With `list_indent` above 0, each bead follows its
+    /// parent, and a bead whose parent is not in this group starts at depth 0.
+    /// With 0, every bead is at depth 0.
     pub fn tree_in(&self, status: &str) -> Vec<(String, usize)> {
         let mut v: Vec<&Bead> = self
             .beads
@@ -167,6 +181,9 @@ impl App {
                 .cmp(&b.priority)
                 .then_with(|| b.updated_at.cmp(&a.updated_at))
         });
+        if self.list_indent == 0 {
+            return v.into_iter().map(|b| (b.id.clone(), 0)).collect();
+        }
         let in_group: HashSet<&str> = v.iter().map(|b| b.id.as_str()).collect();
         let mut roots: Vec<&Bead> = Vec::new();
         let mut children: HashMap<&str, Vec<&Bead>> = HashMap::new();
@@ -801,11 +818,7 @@ impl App {
     /// plugin command its own config directory, and that is the only place a
     /// plugin may keep user-editable settings.
     fn auto_dock_marker() -> Option<std::path::PathBuf> {
-        let dir = std::env::var("HERDR_PLUGIN_CONFIG_DIR").ok()?;
-        if dir.is_empty() {
-            return None;
-        }
-        Some(std::path::Path::new(&dir).join("auto-dock"))
+        crate::config::plugin_config_dir().map(|d| d.join("auto-dock"))
     }
 
     pub fn auto_dock_enabled(&self) -> bool {
@@ -893,6 +906,7 @@ mod tree_tests {
     #[test]
     fn children_follow_their_parent_one_level_deeper() {
         let mut app = App::new(Mode::Dock, Scope::Repo);
+        app.list_indent = 2;
         app.beads = vec![
             bead("child-p0", 0, Some("epic")),
             bead("epic", 2, None),
@@ -924,5 +938,20 @@ mod tree_tests {
             ]
         );
         assert_eq!(app.ids_in("open").len(), 9);
+    }
+
+    #[test]
+    fn zero_indent_keeps_the_flat_priority_order() {
+        let mut app = App::new(Mode::Dock, Scope::Repo);
+        app.list_indent = 0;
+        app.beads = vec![
+            bead("child", 0, Some("epic")),
+            bead("epic", 2, None),
+            bead("loose", 1, None),
+        ];
+        assert_eq!(
+            app.tree_in("open"),
+            [("child".into(), 0), ("loose".into(), 0), ("epic".into(), 0)]
+        );
     }
 }
